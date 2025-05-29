@@ -88,14 +88,12 @@ func TestDb(t *testing.T) {
 func TestSegmentCreation(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Small segment size for testing (100 bytes)
 	db, err := OpenWithMaxSize(tmp, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Write enough data to exceed the limit
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("key%d", i)
 		value := fmt.Sprintf("value%d", i)
@@ -105,7 +103,6 @@ func TestSegmentCreation(t *testing.T) {
 		}
 	}
 
-	// Verify that multiple segments were created
 	if len(db.segments) <= 1 {
 		t.Errorf("Expected multiple segments, got %d", len(db.segments))
 	}
@@ -114,14 +111,12 @@ func TestSegmentCreation(t *testing.T) {
 func TestMergeSegments(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Very small segment size for testing
 	db, err := OpenWithMaxSize(tmp, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	// Create multiple segments
 	for i := 0; i < 10; i++ {
 		err := db.Put("key", "value")
 		if err != nil {
@@ -129,10 +124,8 @@ func TestMergeSegments(t *testing.T) {
 		}
 	}
 
-	// Force merge
 	db.mergeSegments()
 
-	// Verify only one segment remains after merge
 	if len(db.segments) != 1 {
 		t.Errorf("Expected 1 segment after merge, got %d", len(db.segments))
 	}
@@ -190,7 +183,6 @@ func TestLatestValueAfterMerge(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Add multiple versions of same key
 	err = db.Put("key", "value1")
 	if err != nil {
 		t.Fatal(err)
@@ -200,10 +192,8 @@ func TestLatestValueAfterMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Trigger merge
 	db.mergeSegments()
 
-	// Verify we get the latest value
 	value, err := db.Get("key")
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +212,6 @@ func TestSegmentFileNaming(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Create multiple segments
 	for i := 0; i < 3; i++ {
 		err := db.Put("key", "value")
 		if err != nil {
@@ -230,7 +219,6 @@ func TestSegmentFileNaming(t *testing.T) {
 		}
 	}
 
-	// Verify segment file names
 	files, err := os.ReadDir(tmp)
 	if err != nil {
 		t.Fatal(err)
