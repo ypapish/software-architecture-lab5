@@ -201,12 +201,20 @@ func (db *Db) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	var firstErr error
+
 	for _, seg := range db.segments {
-		if err := seg.file.Close(); err != nil {
-			return err
+		if seg.file != nil {
+			if err := seg.file.Close(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("failed to close segment %s: %w", seg.filePath, err)
+			}
 		}
 	}
-	return nil
+
+	db.segments = nil
+	db.out = nil
+
+	return firstErr
 }
 
 func (db *Db) Get(key string) (string, error) {
