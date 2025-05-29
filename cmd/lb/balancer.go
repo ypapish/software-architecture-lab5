@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ypapish/software-architecture-lab4/httptools"
-	"github.com/ypapish/software-architecture-lab4/signal"
+	"github.com/ypapish/software-architecture-lab5/httptools"
+	"github.com/ypapish/software-architecture-lab5/signal"
 )
 
 var (
