@@ -30,6 +30,8 @@ type segment struct {
 
 type Db struct {
 	mu         sync.RWMutex
+	writeMutex sync.Mutex
+	writeChan  chan writeRequest
 	out        *segment
 	segments   []*segment
 	index      map[string]segmentLocation
@@ -37,6 +39,8 @@ type Db struct {
 	dir        string
 	nextSegID  int
 	workerPool chan workerRequest
+	writerDone chan struct{}
+	closeOnce  sync.Once
 }
 
 type segmentLocation struct {
@@ -57,6 +61,12 @@ type workerResponse struct {
 	err   error
 }
 
+type writeRequest struct {
+	key   string
+	value string
+	err   chan error
+}
+
 func Open(dir string) (*Db, error) {
 	return OpenWithMaxSize(dir, defaultMaxSize)
 }
@@ -72,17 +82,36 @@ func OpenWithMaxSize(dir string, maxSize int64) (*Db, error) {
 		dir:        dir,
 		segments:   make([]*segment, 0),
 		workerPool: make(chan workerRequest, workerPoolSize),
+		writeChan:  make(chan writeRequest),
+		writerDone: make(chan struct{}),
 	}
 
-	for range workerPoolSize {
+	for i := 0; i < workerPoolSize; i++ {
 		go db.worker()
 	}
 
+	go db.writer()
+
 	if err := db.recover(); err != nil {
+		db.Close()
 		return nil, err
 	}
 
 	return db, nil
+}
+
+func (db *Db) writer() {
+	for {
+		select {
+		case req := <-db.writeChan:
+			db.writeMutex.Lock()
+			err := db.doPut(req.key, req.value)
+			req.err <- err
+			db.writeMutex.Unlock()
+		case <-db.writerDone:
+			return
+		}
+	}
 }
 
 func (db *Db) worker() {
@@ -208,7 +237,9 @@ func (db *Db) recoverSegmentIndex(seg *segment) error {
 		}
 
 		seg.index[record.key] = offset
+		db.mu.Lock()
 		db.index[record.key] = segmentLocation{segID: seg.id, offset: offset}
+		db.mu.Unlock()
 		offset += int64(n)
 	}
 	return nil
@@ -247,36 +278,39 @@ func (db *Db) createNewSegment() error {
 }
 
 func (db *Db) Close() error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	close(db.workerPool)
-
 	var firstErr error
+	db.closeOnce.Do(func() {
+		close(db.writerDone)
+		close(db.workerPool)
 
-	for _, seg := range db.segments {
-		if seg.file != nil {
-			if err := seg.file.Close(); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("failed to close segment %s: %w", seg.filePath, err)
+		db.writeMutex.Lock()
+		defer db.writeMutex.Unlock()
+
+		for _, seg := range db.segments {
+			if seg.file != nil {
+				if err := seg.file.Close(); err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("failed to close segment %s: %w", seg.filePath, err)
+				}
 			}
 		}
-	}
 
-	db.segments = nil
-	db.out = nil
+		db.segments = nil
+		db.out = nil
+	})
 
 	return firstErr
 }
 
 func (db *Db) Get(key string) (string, error) {
 	db.mu.RLock()
-	defer db.mu.RUnlock()
-
 	loc, ok := db.index[key]
+	db.mu.RUnlock()
+
 	if !ok {
 		return "", ErrNotFound
 	}
 
+	db.mu.RLock()
 	var seg *segment
 	for _, s := range db.segments {
 		if s.id == loc.segID {
@@ -284,6 +318,8 @@ func (db *Db) Get(key string) (string, error) {
 			break
 		}
 	}
+	db.mu.RUnlock()
+
 	if seg == nil {
 		return "", fmt.Errorf("segment %d not found", loc.segID)
 	}
@@ -301,10 +337,7 @@ func (db *Db) Get(key string) (string, error) {
 	return resp.value, resp.err
 }
 
-func (db *Db) Put(key, value string) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
+func (db *Db) doPut(key, value string) error {
 	e := entry{
 		key:   key,
 		value: value,
@@ -322,8 +355,11 @@ func (db *Db) Put(key, value string) error {
 		return err
 	}
 
+	db.mu.Lock()
 	db.out.index[key] = db.out.size
 	db.index[key] = segmentLocation{segID: db.out.id, offset: db.out.size}
+	db.mu.Unlock()
+
 	db.out.size += int64(n)
 
 	if len(db.segments) > 1 {
@@ -333,9 +369,19 @@ func (db *Db) Put(key, value string) error {
 	return nil
 }
 
+func (db *Db) Put(key, value string) error {
+	errChan := make(chan error, 1)
+	db.writeChan <- writeRequest{
+		key:   key,
+		value: value,
+		err:   errChan,
+	}
+	return <-errChan
+}
+
 func (db *Db) mergeSegments() {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.writeMutex.Lock()
+	defer db.writeMutex.Unlock()
 
 	if len(db.segments) <= 1 {
 		return
@@ -417,10 +463,12 @@ func (db *Db) mergeSegments() {
 		newSeg.index[k] = loc.offset
 	}
 
+	db.mu.Lock()
 	db.segments = []*segment{newSeg}
 	db.out = newSeg
 	db.nextSegID++
 	db.index = newIndex
+	db.mu.Unlock()
 
 	for _, seg := range db.segments[:len(db.segments)-1] {
 		os.Remove(seg.filePath)
