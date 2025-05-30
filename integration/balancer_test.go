@@ -2,6 +2,7 @@ package integration
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"testing"
@@ -30,7 +31,7 @@ func TestBalancer(t *testing.T) {
 		serverHits = make(map[string]int)
 
 		for i := 0; i < numRequests; i++ {
-			resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
+			resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data?key=myteam", baseAddress))
 			if err != nil {
 				t.Errorf("Request failed: %v", err)
 				continue
@@ -43,7 +44,16 @@ func TestBalancer(t *testing.T) {
 				continue
 			}
 
-			t.Logf("Request %d: handled by server %s", i+1, server)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Errorf("Failed to read response body: %v", err)
+				continue
+			}
+			if len(body) == 0 {
+				t.Errorf("Received empty data for request %d", i+1)
+			}
+
+			t.Logf("Request %d: handled by server %s, data: %s", i+1, server, string(body))
 			serverHits[server]++
 		}
 
@@ -71,7 +81,7 @@ func BenchmarkBalancer(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data", baseAddress))
+		resp, err := client.Get(fmt.Sprintf("%s/api/v1/some-data?key=myteam", baseAddress))
 		if err != nil {
 			b.Error(err)
 			continue

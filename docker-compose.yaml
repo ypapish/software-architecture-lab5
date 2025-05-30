@@ -2,7 +2,6 @@ networks:
   servers:
 
 services:
-
   balancer:
     build: .
     command: "lb"
@@ -13,21 +12,37 @@ services:
 
   server1:
     build: .
+    command: "server"
     networks:
       - servers
-    ports:
-      - "8080:8080"
+    environment:
+      - DB_SERVICE_ADDR=http://db:8081
 
   server2:
     build: .
+    command: "server"
     networks:
       - servers
-    ports:
-      - "8081:8080"
+    environment:
+      - DB_SERVICE_ADDR=http://db:8081
 
   server3:
     build: .
+    command: "server"
     networks:
       - servers
+    environment:
+      - DB_SERVICE_ADDR=http://db:8081
+
+  db:
+    build: .
+    command: "db"
+    networks:
+      - servers
+    volumes:
+      - db-data:/data
     ports:
-      - "8082:8080"
+      - "8083:8081"
+
+volumes:
+  db-data:
