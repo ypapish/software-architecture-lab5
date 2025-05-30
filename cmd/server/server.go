@@ -1,11 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
+	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/ypapish/software-architecture-lab5/httptools"
@@ -14,43 +15,96 @@ import (
 
 var port = flag.Int("port", 8080, "server port")
 
-const confResponseDelaySec = "CONF_RESPONSE_DELAY_SEC"
-const confHealthFailure = "CONF_HEALTH_FAILURE"
+const (
+	confHealthFailure = "CONF_HEALTH_FAILURE"
+	dbServiceAddr     = "DB_SERVICE_ADDR"
+	teamName          = "myteam"
+)
+
+func saveInitialData(dbBaseURL string) {
+	currentDate := time.Now().Format("2006-01-02")
+	data := map[string]string{"value": currentDate}
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Fatal("Error marshalling initial data:", err)
+	}
+
+	maxRetries := 5
+	for i := 0; i < maxRetries; i++ {
+		resp, err := http.Post(dbBaseURL+"/db/"+teamName, "application/json", bytes.NewBuffer(jsonData))
+		if err == nil && resp.StatusCode == http.StatusCreated {
+			resp.Body.Close()
+			return
+		}
+		if err != nil {
+			log.Printf("Trr %d: Error during data saving: %v", i+1, err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	log.Fatal("Data wasn`t saved after multiply tries")
+}
 
 func main() {
-	h := new(http.ServeMux)
+	flag.Parse()
 
-	h.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
-		rw.Header().Set("content-type", "text/plain")
-		if failConfig := os.Getenv(confHealthFailure); failConfig == "true" {
-			rw.WriteHeader(http.StatusInternalServerError)
-			_, _ = rw.Write([]byte("FAILURE"))
+	dbBaseURL := os.Getenv(dbServiceAddr)
+	if dbBaseURL == "" {
+		dbBaseURL = "http://db:8083"
+	}
+
+	saveInitialData(dbBaseURL)
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		if os.Getenv(confHealthFailure) == "true" {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("FAILURE"))
 		} else {
-			rw.WriteHeader(http.StatusOK)
-			_, _ = rw.Write([]byte("OK"))
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
 		}
 	})
 
-	report := make(Report)
-
-	h.HandleFunc("/api/v1/some-data", func(rw http.ResponseWriter, r *http.Request) {
-		respDelayString := os.Getenv(confResponseDelaySec)
-		if delaySec, parseErr := strconv.Atoi(respDelayString); parseErr == nil && delaySec > 0 && delaySec < 300 {
-			time.Sleep(time.Duration(delaySec) * time.Second)
+	http.HandleFunc("/api/v1/some-data", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
 
-		report.Process(r)
+		key := r.URL.Query().Get("key")
+		if key == "" {
+			http.Error(w, "Key required", http.StatusBadRequest)
+			return
+		}
 
-		rw.Header().Set("content-type", "application/json")
-		rw.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(rw).Encode([]string{
-			"1", "2",
-		})
+		resp, err := http.Get(dbBaseURL + "/db/" + key)
+		if err != nil {
+			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			http.Error(w, "DB error", http.StatusInternalServerError)
+			return
+		}
+
+		var data map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			http.Error(w, "Error decoding DB response", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(data)
 	})
 
-	h.Handle("/report", report)
-
-	server := httptools.CreateServer(*port, h)
+	server := httptools.CreateServer(*port, nil)
 	server.Start()
 	signal.WaitForTerminationSignal()
 }
