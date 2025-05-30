@@ -11,6 +11,7 @@ RUN go install ./cmd/...
 FROM alpine:latest
 WORKDIR /opt/practice-4
 COPY entry.sh /opt/practice-4/
+RUN chmod +x /opt/practice-4/entry.sh
 COPY --from=build /go/bin/* /opt/practice-4
 RUN ls /opt/practice-4
 ENTRYPOINT ["/opt/practice-4/entry.sh"]
