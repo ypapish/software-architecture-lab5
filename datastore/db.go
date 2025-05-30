@@ -15,6 +15,7 @@ const (
 	outFileName    = "current-data"
 	segmentPrefix  = "segment-"
 	defaultMaxSize = 10 * 1024 * 1024
+	workerPoolSize = 10
 )
 
 var ErrNotFound = fmt.Errorf("record does not exist")
@@ -28,18 +29,32 @@ type segment struct {
 }
 
 type Db struct {
-	mu        sync.RWMutex
-	out       *segment
-	segments  []*segment
-	index     map[string]segmentLocation
-	maxSize   int64
-	dir       string
-	nextSegID int
+	mu         sync.RWMutex
+	out        *segment
+	segments   []*segment
+	index      map[string]segmentLocation
+	maxSize    int64
+	dir        string
+	nextSegID  int
+	workerPool chan workerRequest
 }
 
 type segmentLocation struct {
 	segID  int
 	offset int64
+}
+
+type workerRequest struct {
+	key      string
+	segID    int
+	offset   int64
+	filePath string
+	result   chan workerResponse
+}
+
+type workerResponse struct {
+	value string
+	err   error
 }
 
 func Open(dir string) (*Db, error) {
@@ -52,10 +67,15 @@ func OpenWithMaxSize(dir string, maxSize int64) (*Db, error) {
 	}
 
 	db := &Db{
-		index:    make(map[string]segmentLocation),
-		maxSize:  maxSize,
-		dir:      dir,
-		segments: make([]*segment, 0),
+		index:      make(map[string]segmentLocation),
+		maxSize:    maxSize,
+		dir:        dir,
+		segments:   make([]*segment, 0),
+		workerPool: make(chan workerRequest, workerPoolSize),
+	}
+
+	for range workerPoolSize {
+		go db.worker()
 	}
 
 	if err := db.recover(); err != nil {
@@ -63,6 +83,35 @@ func OpenWithMaxSize(dir string, maxSize int64) (*Db, error) {
 	}
 
 	return db, nil
+}
+
+func (db *Db) worker() {
+	for req := range db.workerPool {
+		file, err := os.Open(req.filePath)
+		if err != nil {
+			req.result <- workerResponse{err: err}
+			continue
+		}
+
+		func() {
+			defer file.Close()
+
+			_, err = file.Seek(req.offset, 0)
+			if err != nil {
+				req.result <- workerResponse{err: err}
+				return
+			}
+
+			var record entry
+			_, err = record.DecodeFromReader(bufio.NewReader(file))
+			if err != nil {
+				req.result <- workerResponse{err: err}
+				return
+			}
+
+			req.result <- workerResponse{value: record.value}
+		}()
+	}
 }
 
 func (db *Db) recover() error {
@@ -201,6 +250,8 @@ func (db *Db) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	close(db.workerPool)
+
 	var firstErr error
 
 	for _, seg := range db.segments {
@@ -237,22 +288,17 @@ func (db *Db) Get(key string) (string, error) {
 		return "", fmt.Errorf("segment %d not found", loc.segID)
 	}
 
-	file, err := os.Open(seg.filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	_, err = file.Seek(loc.offset, 0)
-	if err != nil {
-		return "", err
+	resultChan := make(chan workerResponse, 1)
+	db.workerPool <- workerRequest{
+		key:      key,
+		segID:    loc.segID,
+		offset:   loc.offset,
+		filePath: seg.filePath,
+		result:   resultChan,
 	}
 
-	var record entry
-	if _, err = record.DecodeFromReader(bufio.NewReader(file)); err != nil {
-		return "", err
-	}
-	return record.value, nil
+	resp := <-resultChan
+	return resp.value, resp.err
 }
 
 func (db *Db) Put(key, value string) error {
